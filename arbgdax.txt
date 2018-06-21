@@ -1,0 +1,273 @@
+//chain test
+var console = require('better-console');
+ 
+var ti = require('./trading-interface.js');
+//var bc = require('./binance.js');
+ 
+const chains = [
+  'LTC-USD', 'BTC-USD','LTC-BTC',
+  'ETH-USD', 'ETH-BTC'
+];
+ 
+const base_amount = 1400; //USD
+const fee_amount = .003; //.3%
+const profit_margin = 7.5; //USD
+ 
+var CHAIN_MUTEX = false;
+ 
+const chain_sequence = [ ['LTC-USD', 'BTC-USD', 'LTC-BTC'], ['ETH-USD', 'BTC-USD', 'ETH-BTC'] ];
+const trade_mapping = {
+    'buy'  : {
+      'LTC-USD' : ti.buy_ltc_usd,
+      'BTC-USD' : ti.buy_btc_usd,
+      'ETH-USD' : ti.buy_eth_usd,
+      'LTC-BTC' : ti.buy_ltc_btc,
+      'ETH-BTC' : ti.buy_eth_btc
+    },
+    'sell' : {
+      'LTC-USD' : ti.sell_ltc_usd,
+      'BTC-USD' : ti.sell_btc_usd,
+      'ETH-USD' : ti.sell_eth_usd,
+      'LTC-BTC' : ti.sell_ltc_btc,
+      'ETH-BTC' : ti.sell_eth_btc
+    },
+ 
+};
+ 
+ 
+var chain_trade_flow = function(c){
+    if(CHAIN_MUTEX){
+        console.log("CHAIN IS ALREADY OPEN, SKIPPING " + c[0][0]);
+        return;
+    }
+ 
+    CHAIN_MUTEX = true;
+ 
+    var first_size = c[1][2]
+    var first_price = c[1][3]
+ 
+    var second_size =c[2][2]
+    var second_price = c[2][3]
+ 
+    var third_size = c[3][2]
+    var third_price = c[3][3]
+ 
+    var first_trade =  (p,s) => {
+        console.log('BUYING: ' + s + ' at ' + p);
+        return trade_mapping[ c[1][0] ][ c[1][1] ](p,s );
+    };
+   
+    var second_trade = (p,s) => {
+        console.log('BUYING: ' + s + ' at ' + p);
+        return trade_mapping[ c[2][0] ][ c[2][1] ]( p, s );
+    };
+   
+    var third_trade = (p,s) => {
+        console.log('SELLING: ' + s + ' at ' + p);
+        return trade_mapping[ c[3][0] ][ c[3][1] ](p, s );
+    };
+ 
+    //trade1
+    first_trade(first_price, first_size)
+        .then((o) => {
+            console.log('placed first trade');
+            //return filled order w/amount
+            return ti.get_order(o.id)
+                .then((o_data) => {
+                    console.log('first trade validation');
+                    console.log(o_data);
+                    return o_data;
+                });
+        },function(err){
+            throw new Error(err);
+        })
+ 
+        .then(() => {
+            return second_trade( second_price, second_size);
+        })
+        .then((o) => {
+            console.log('placed second trade');
+            //return filled order w/amount
+            return ti.get_order(o.id)
+                .then((o_data) => {
+                    console.log('second trade validation');
+                    console.log(o_data);
+                    return o_data;
+                });
+        },function(err){
+            throw new Error(err);
+        })
+ 
+        .then(()=>{
+            return third_trade( third_price, third_size );
+        })
+        .then((o) => {
+            console.log('placed final trade');
+            //return final amount
+            return ti.get_order(o.id)
+                .then((o_data) => {
+                    console.log('third trade validation - chaning mutex back to false');
+                    console.log(o_data);
+                    CHAIN_MUTEX = false;
+ 
+                    return o_data;
+                });
+        },function(err){
+            throw new Error(err);
+        })
+ 
+};
+ 
+var check_chains = function(cns){
+    return cns.map(function(pc){
+        //console.log(pc);
+        let p1 = pair_buffer[ pc[0] ].price
+        let p2 = pair_buffer[ pc[1] ].price
+        let p3 = pair_buffer[ pc[2] ].price
+ 
+        let s1_amount = Math.floor( 100000 * ( base_amount / p2 ) ) / 100000;
+        let s2_amount = Math.floor( 100000 * ( s1_amount / p3 ) ) / 100000;
+        let s3 = Math.floor( 100000 * ( s2_amount * p1 ) ) / 100000;
+ 
+        return [
+            [pc[0], p1 ],
+ 
+            //calculate_chain( p1 , p2, p3 ),
+ 
+            ['buy', pc[1], s1_amount, p2],
+            ['buy', pc[2], s2_amount, p3],
+            ['sell',pc[0], s2_amount, p1],
+ 
+            ( (s3 - s3*fee_amount) - base_amount ) //profit
+        ];
+    });
+};
+ 
+ 
+var chains_price_ready = function(){
+    return chains.filter(function(c){
+        if(pair_buffer[c]){
+            return false;
+        }else{
+            return true;
+        }
+    });
+};
+ 
+setTimeout(function(){
+ 
+ 
+        setInterval(function(){
+            if(chains_price_ready().length < 1 ){
+                console.log("TRADE SIZE: " + base_amount + "USD");
+                var chain_data = check_chains(chain_sequence);
+ 
+                var trade_chains = chain_data.filter((c) =>{
+                    if(c[4] >profit_margin){
+                        return true;
+                    }else{
+                        return false;
+                    }
+                });
+                console.table( chain_data );
+                if(trade_chains.length > 0 && !CHAIN_MUTEX){
+                    console.log("TRADE THIS NOW - DISCREPANCY FOUND!!");
+                    console.table( trade_chains );
+                //  trade_chains.forEach(chain_trade_flow);
+                }
+ 
+            }
+        },500);
+ 
+},10*1000);
+ 
+ 
+var calculate_chain = (a,b,c) => {
+   
+    /*
+     
+     The following equation represents the calculation of an implicit cross exchange rate,
+     the exchange rate one would expect in the market as implied from the ratio of two currencies other than the base currency
+     Sa = Sab * Sb
+   
+     Sa is the implicit cross exchange rate for X in terms of currency a  ( LTC / USD  )
+     Sab is the quoted market cross exchange rate for b in terms of currency a  ( BTC / USD ) (variable point)
+     Sb is the quoted market cross exchange rate for X in terms of currency b ( LTC / BTC  )
+ 
+ 
+            Lightcoin chain
+            LTC/USD
+            BTC/USD
+            LTC/BTC
+ 
+            Ether Chain
+            ETH/USD
+            BTC/USD
+            ETH/BTC
+ 
+            LTC/BTC
+            ETH/BTC
+            LTC/USD
+ 
+     if an inequality exists between the market cross exchange rate,
+     Sa, and the implicit cross exchange rate, Sab * Sb,
+     then there exists an opportunity for arbitrage profits on the difference between the two exchange rates.
+ 
+ 
+     example pair chains, only base prices are USD, EUR, GBP, and BTC, so middle pair MUST be in one of those
+ 
+ 
+    */
+    let Sa = a;
+    let Sab = b;
+    let Sb = c;
+    //var Sa = ( Sb * Sc );
+ 
+    return [ Sa - (Sab * Sb)];
+};
+ 
+var chain_get_error  = (e) => {
+    console.log("ERROR IN GETTING CURRENCY PAIRS: ");
+    console.log(e);
+};
+ 
+var pair_buffer = {};
+ 
+var feed_method = (data) => {
+    if(data.type === 'match' && chains.indexOf(data.product_id) >=0 ){//'done' && data.reason === 'filled' && data.side === 'buy'){
+        //console.log(data);
+        pair_buffer[data.product_id] = data;
+        var op = Object.keys(data).map( (d) => {
+            return [d + ': ' + data[d]];
+        });
+        //console.table(pair_buffer);
+    }
+};
+ 
+var setup_socket_stream = function(ps){
+    var ws = new ti.aG.WebsocketClient(ps);
+    //ws.message('subscribe',{"type": "subscribe", product_ids: chains });
+ 
+    ws.on('message',feed_method);
+};
+ 
+ 
+var get_binance_pairs = () => {
+    bc.api('ticker',function(t){
+        console.log(t);
+    });
+};
+ 
+//get_binance_pairs();
+ 
+ 
+ 
+ti.get_products()
+    .then(function(d){
+        let pairs = d.map( (p) => {
+            return p.display_name.replace('/','-');
+        });
+ 
+        return pairs;
+    },chain_get_error)
+    .then(setup_socket_stream);
